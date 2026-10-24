@@ -1,0 +1,42 @@
+name: T3ProMax
+options:
+  bundleIdPrefix: com.andrescampos
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: P62A3QS593
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    ENABLE_HARDENED_RUNTIME: YES
+targets:
+  T3ProMax:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: T3 Code Pro Max
+        CFBundleDisplayName: T3 Code Pro Max
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIconFile: AppIcon
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSPrincipalClass: NSApplication
+        LSMinimumSystemVersion: "14.0"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.andrescampos.t3promax
+            CFBundleURLSchemes: [t3pm]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrescampos.t3promax
+        PRODUCT_NAME: T3 Code Pro Max
+        CODE_SIGN_ENTITLEMENTS: App/T3ProMax.entitlements
