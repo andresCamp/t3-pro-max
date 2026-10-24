@@ -16,6 +16,10 @@ enum ControlServer {
 
     /// Starts listening. Called once at launch; failures are logged, the app works without it.
     static func start(handler: @escaping @Sendable ([String: Any]) async -> [String: Any]) {
+        // A client that hangs up before its reply (a timed-out MCP call) makes the write
+        // raise SIGPIPE, whose default action kills the whole app. Ignored, the write
+        // just fails with EPIPE.
+        signal(SIGPIPE, SIG_IGN)
         let path = socketPath
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
