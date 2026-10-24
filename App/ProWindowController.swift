@@ -21,6 +21,16 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     private var pairAttempts = 0
     /// The page to show once pairing finishes: pairing always lands on T3's home page.
     private var pendingPath: String?
+    /// True once the web page is showing; until then it loads under the cover, out of sight.
+    private var revealed = false
+    /// The current page has drawn T3's app shell (page-bridge.js says so).
+    private var pageReady = false
+    /// The page under the cover is the one to show: signed in, no redirect still to come.
+    private var finalPage = false
+    private var revealFallback: Task<Void, Never>?
+    /// A spare window pairs and loads out of sight, so New Window can show a ready page
+    /// at once. It is saved, listed and shown only once `adopt` makes it a real window.
+    private(set) var isSpare: Bool
 
     /// Called when the window closes for good (not when the app quits).
     var onClose: ((ProWindowController) -> Void)?
@@ -33,8 +43,9 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     /// Zoom steps, as in Safari.
     private static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
 
-    init(record: WindowRecord) {
+    init(record: WindowRecord, spare: Bool = false) {
         self.record = record
+        isSpare = spare
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: record.id)
@@ -61,7 +72,23 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.isReleasedWhenClosed = false
         if let frame = record.frame { window.setFrame(NSRectFromString(frame), display: false) } else { window.center() }
 
+        // One view stack for the window's whole life: the page loads under the cover, and
+        // the cover fades out once there is something worth showing. Swapping the content
+        // view instead showed every intermediate load (blank, pair page, home, saved page).
+        let root = NSView()
+        webView.frame = root.bounds
+        webView.autoresizingMask = [.width, .height]
+        root.addSubview(webView)
+        window.contentView = root
+
         super.init(window: window)
+        waitingView.frame = root.bounds
+        waitingView.autoresizingMask = [.width, .height]
+        waitingView.wantsLayer = true
+        // The cover stays in the window for good, so it must not manage the window's
+        // title or toolbar, which a hosting view does by default.
+        waitingView.sceneBridgingOptions = []
+        root.addSubview(waitingView)
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -94,7 +121,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
                 try? await Task.sleep(for: .seconds(1.5))
             }
             guard let origin, !Task.isCancelled else { return }
-            self.showWeb()
+            self.showWaiting(.loading)
             if self.record.paired {
                 self.webView.load(URLRequest(url: self.savedPage(on: origin)))
             } else {
@@ -108,10 +135,9 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         pairAttempts += 1
         // Three silent tries, then say so: a server refusing to pair needs a person.
         guard pairAttempts <= 3 else { showWaiting(.pairingFailed("T3 Code didn't accept the pairing.")); return }
-        showWaiting(.pairing)
+        showWaiting(.loading)
         do {
             let url = try await T3Server.pairingURL(for: record.id)
-            showWeb()
             webView.load(URLRequest(url: url))
         } catch {
             showWaiting(.pairingFailed(error.localizedDescription))
@@ -135,18 +161,28 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         return try? await webView.callAsyncJavaScript(script, contentWorld: .defaultClient) as? Bool
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // A new document: wait for it to draw before showing it.
+        pageReady = false
+        finalPage = false
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let url = webView.url, !url.path.hasPrefix("/pair") else { return }
         Task {
-            guard let authenticated = await isAuthenticated() else { return }
+            guard let authenticated = await isAuthenticated() else { revealWhenReady(); return }
             if authenticated {
                 pairAttempts = 0
                 record.paired = true
-                WindowStore.shared.upsert(record)
+                persist()
+                // Pairing lands on the home page, so a window opened on "/" is already there.
+                if pendingPath == url.pathQueryFragment { pendingPath = nil }
                 if let path = pendingPath, let origin = T3Server.origin(),
                    let target = URL(string: origin.absoluteString.trimmingSuffix("/") + path) {
                     pendingPath = nil
                     webView.load(URLRequest(url: target))
+                } else {
+                    revealWhenReady()
                 }
             } else {
                 // The session expired or was revoked in T3's settings: pair again, keep the page.
@@ -168,14 +204,52 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     private func urlChanged(_ url: URL?) {
         guard let url, url.scheme?.hasPrefix("http") == true, !url.path.hasPrefix("/pair") else { return }
         record.url = url.absoluteString
-        WindowStore.shared.upsert(record)
+        persist()
     }
 
     // MARK: Folder title, zoom and Mission Control
 
+    /// Shows the page once it is the final one and has drawn. T3 can render without the
+    /// sidebar (collapsed), so the bridge's signal never comes; a short wait covers that.
+    private func revealWhenReady() {
+        finalPage = true
+        if pageReady { reveal(); return }
+        revealFallback?.cancel()
+        revealFallback = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self?.reveal()
+        }
+    }
+
+    private func reveal() {
+        revealFallback?.cancel()
+        guard !revealed else { return }
+        revealed = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            waitingView.animator().alphaValue = 0
+        }
+        // Hidden on a timer, not in the animation's completion handler: the cover stayed
+        // up over a loaded page when that handler never ran.
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(260))
+            guard let self, self.revealed else { return }
+            self.waitingView.isHidden = true
+            self.window?.makeFirstResponder(self.webView)
+        }
+    }
+
     /// Messages from page-bridge.js.
     private func pageMessage(_ body: Any) {
-        guard let message = body as? [String: Any], message["type"] as? String == "scope" else { return }
+        guard let message = body as? [String: Any] else { return }
+        if message["type"] as? String == "ready" {
+            pageReady = true
+            if finalPage { reveal() }
+            return
+        }
+        guard message["type"] as? String == "scope" else { return }
         scope = message["name"] as? String
         // The title is the short name ("SalesAutomation-Project"); the owner shows in Mission Control.
         window?.title = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Self.defaultTitle
@@ -189,14 +263,14 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         webView.pageZoom = next
         tools.zoomLabel = Self.percent(next)
         record.zoom = next == 1 ? nil : Double(next)
-        WindowStore.shared.upsert(record)
+        persist()
     }
 
     private static func percent(_ zoom: CGFloat) -> String { "\(Int((zoom * 100).rounded()))%" }
 
     /// Shows or hides the folder overlay while Mission Control is open.
     func setMissionControl(_ active: Bool) {
-        guard window?.contentView === webView else { return }
+        guard revealed else { return }
         var argument: [String: Any] = ["show": active]
         if active, let icon = NSApp.applicationIconImage.pngData(size: 240) {
             argument["appIcon"] = "data:image/png;base64," + icon.base64EncodedString()
@@ -206,6 +280,26 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     }
 
     // MARK: Control (used by the MCP server through AppDelegate)
+
+    /// Turns the spare into a real window: placed at `frame`, on `path` if one is given.
+    /// The spare has usually paired and loaded T3 already, so the page shows at once.
+    func adopt(frame: String?, path: String?) {
+        isSpare = false
+        if let frame {
+            record.frame = frame
+            window?.setFrame(NSRectFromString(frame), display: false)
+        }
+        persist()
+        guard let path, path != webView.url?.pathQueryFragment else { return }
+        // Cover the switch: the spare's own page should not show on the way.
+        showWaiting(.loading)
+        navigate(path: path)
+    }
+
+    private func persist() {
+        guard !isSpare else { return }
+        WindowStore.shared.upsert(record)
+    }
 
     /// Shows a T3 page (path, query and fragment) in this window.
     func navigate(path: String) {
@@ -220,11 +314,12 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     /// A PNG of what the window shows: the web page, or the waiting screen.
     func snapshot() async -> Data? {
-        guard let window else { return nil }
-        if window.contentView === webView, let image = try? await webView.takeSnapshot(configuration: nil) {
+        guard window != nil else { return nil }
+        if revealed, let image = try? await webView.takeSnapshot(configuration: nil) {
             return image.pngData
         }
-        guard let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        let view = waitingView
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
         return rep.representation(using: .png, properties: [:])
     }
@@ -241,19 +336,20 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             "focused": window?.isKeyWindow ?? false,
             "folder": scope ?? "",
             "zoom": Double(webView.pageZoom),
-            "connected": window?.contentView === webView && record.paired,
+            "connected": revealed && record.paired,
         ]
     }
 
     // MARK: Waiting screen
 
+    /// Covers the page again, at once: only an error or a lost server brings the cover back.
     private func showWaiting(_ state: WaitingModel.State) {
         waiting.state = state
-        if window?.contentView !== waitingView { window?.contentView = waitingView }
-    }
-
-    private func showWeb() {
-        if window?.contentView !== webView { window?.contentView = webView }
+        revealFallback?.cancel()
+        guard revealed || waitingView.isHidden else { return }
+        revealed = false
+        waitingView.alphaValue = 1
+        waitingView.isHidden = false
     }
 
     // MARK: Links, dialogs and file pickers
@@ -314,11 +410,12 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     private func saveFrame() {
         guard let frame = window?.frame else { return }
         record.frame = NSStringFromRect(frame)
-        WindowStore.shared.upsert(record)
+        persist()
     }
 
     func windowWillClose(_ notification: Notification) {
         pairingTask?.cancel()
+        revealFallback?.cancel()
         observations.removeAll()
         // Quitting keeps every window for next launch; closing one forgets it.
         guard (NSApp.delegate as? AppDelegate)?.isTerminating != true else { return }
@@ -326,7 +423,8 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         WindowStore.shared.remove(id)
         webView.removeFromSuperview()
         onClose?(self)
-        Task.detached {
+        // WebKit asserts that data stores are removed on the main thread.
+        Task { @MainActor in
             await T3Server.revokeSessions(for: id)
             // The store can only be removed once no web view uses it.
             try? await Task.sleep(for: .seconds(1))
@@ -342,6 +440,16 @@ final class TitlebarTools: NSTitlebarAccessoryViewController {
     var onZoom: (Int) -> Void = { _ in }
     var zoomLabel = "100%" { didSet { percentButton?.title = zoomLabel } }
     private var percentButton: NSButton?
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        // Set before the window adds the accessory: it reads the position then, and the
+        // default (.bottom) reserves a strip under the title bar that the content view
+        // never gets back.
+        layoutAttribute = .trailing
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
         let zoomOut = PillButton.make(symbol: "minus", title: nil, tooltip: "Zoom Out") { [weak self] in self?.onZoom(-1) }
@@ -362,7 +470,6 @@ final class TitlebarTools: NSTitlebarAccessoryViewController {
         row.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
         row.frame.size = NSSize(width: row.fittingSize.width, height: 28)
         view = row
-        layoutAttribute = .trailing
     }
 }
 

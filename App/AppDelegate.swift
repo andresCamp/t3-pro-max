@@ -2,6 +2,7 @@
 // and handles t3pm:// links (t3pm://open?path=/<environment>/<thread>).
 
 import AppKit
+import WebKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -9,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// True while quitting, so closing windows keeps them for next launch instead of forgetting them.
     private(set) var isTerminating = false
     private let missionControl = MissionControlWatcher()
+    /// The next New Window, already paired and loaded (see `prepareSpare`).
+    private var spare: ProWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
@@ -22,6 +25,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openWindow()
         } else {
             saved.forEach { show($0) }
+        }
+        Task {
+            await removeOrphans()
+            prepareSpare()
+        }
+    }
+
+    /// Clears what a window leaves behind when the app dies before it can: a window
+    /// closed for good normally revokes its session and deletes its WebKit store itself.
+    /// Reads the open windows each time, so a window opened since launch is never touched.
+    /// Runs before the first spare exists: the spare is in no list, so it would count as one.
+    private func removeOrphans() async {
+        await T3Server.revokeSessions(keeping: controllers.map(\.record.id))
+        let live = Set(controllers.map(\.record.id))
+        for id in await WKWebsiteDataStore.allDataStoreIdentifiers where !live.contains(id) {
+            try? await WKWebsiteDataStore.remove(forIdentifier: id)
         }
     }
 
@@ -44,32 +63,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and on a given display (index into `NSScreen.screens`, 0 is the main display).
     @discardableResult
     func openWindow(path: String? = nil, screen: Int? = nil) -> ProWindowController {
-        var record = WindowRecord(id: UUID())
-        if let path, let origin = T3Server.origin() {
-            record.url = origin.absoluteString.trimmingSuffix("/") + path
-        }
+        var frame: String?
         if let screen, NSScreen.screens.indices.contains(screen) {
             let visible = NSScreen.screens[screen].visibleFrame
             let size = NSSize(width: min(1280, visible.width), height: min(860, visible.height))
-            record.frame = NSStringFromRect(NSRect(
+            frame = NSStringFromRect(NSRect(
                 x: visible.midX - size.width / 2, y: visible.midY - size.height / 2,
                 width: size.width, height: size.height))
         } else if let front = NSApp.keyWindow {
             // Cascade from the frontmost window so a new one doesn't land exactly on top of it.
-            record.frame = NSStringFromRect(front.frame.offsetBy(dx: 28, dy: -28))
+            frame = NSStringFromRect(front.frame.offsetBy(dx: 28, dy: -28))
         }
+
+        // The spare has paired and loaded while out of sight: showing it skips the wait.
+        if let spare {
+            self.spare = nil
+            spare.adopt(frame: frame, path: path)
+            present(spare)
+            prepareSpare()
+            return spare
+        }
+
+        var record = WindowRecord(id: UUID())
+        if let path, let origin = T3Server.origin() {
+            record.url = origin.absoluteString.trimmingSuffix("/") + path
+        }
+        record.frame = frame
         WindowStore.shared.upsert(record)
-        return show(record)
+        let controller = show(record)
+        prepareSpare()
+        return controller
     }
 
     @discardableResult
     private func show(_ record: WindowRecord) -> ProWindowController {
         let controller = ProWindowController(record: record)
+        present(controller)
+        controller.connect()
+        return controller
+    }
+
+    private func present(_ controller: ProWindowController) {
         controller.onClose = { [weak self] closed in self?.controllers.removeAll { $0 === closed } }
         controllers.append(controller)
         controller.showWindow(nil)
+    }
+
+    /// Starts the next spare window: it pairs and loads T3 hidden, so the next New Window
+    /// is ready at once. Never saved; a spare left at quit is cleared at the next launch.
+    private func prepareSpare() {
+        guard spare == nil, !isTerminating else { return }
+        let controller = ProWindowController(record: WindowRecord(id: UUID()), spare: true)
+        spare = controller
         controller.connect()
-        return controller
     }
 
     // MARK: Control channel (see ControlServer and the t3pm-mcp tool)

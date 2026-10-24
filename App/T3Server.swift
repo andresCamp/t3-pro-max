@@ -80,13 +80,27 @@ enum T3Server {
     /// Revokes every session labelled for this window. Best effort: a session that
     /// already expired or was revoked in T3's settings is simply not found.
     static func revokeSessions(for windowID: UUID) async {
-        guard let cli = cli(), let list = try? await run(cli, ["auth", "session", "list"]) else { return }
         let label = sessionLabel(for: windowID)
+        await revokeSessions { $0 == label }
+    }
+
+    /// Revokes this app's sessions that belong to none of `windows`: left behind when the
+    /// app crashed or was killed before a closed window could revoke its own.
+    static func revokeSessions(keeping windows: [UUID]) async {
+        let kept = Set(windows.map(sessionLabel(for:)))
+        await revokeSessions { $0.hasPrefix("T3 Code Pro Max · ") && !kept.contains($0) }
+    }
+
+    /// Revokes every session whose client label matches.
+    private static func revokeSessions(where matches: (String) -> Bool) async {
+        guard let cli = cli(), let list = try? await run(cli, ["auth", "session", "list"]) else { return }
         // `t3 auth session list` prints blocks separated by blank lines; the first
         // line of a block is the session id, and a later line reads "client: <label> | ...".
         for block in list.components(separatedBy: "\n\n") {
             let lines = block.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            guard let id = lines.first, lines.contains(where: { $0.hasPrefix("client: \(label)") }) else { continue }
+            let label = lines.first { $0.hasPrefix("client: ") }
+                .map { $0.dropFirst("client: ".count).components(separatedBy: " | ")[0] }
+            guard let id = lines.first, let label, matches(label) else { continue }
             _ = try? await run(cli, ["auth", "session", "revoke", id])
         }
     }

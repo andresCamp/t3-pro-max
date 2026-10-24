@@ -4,6 +4,8 @@
 //    folder. T3 has no API for it; its filter button carries the label
 //    "Filter threads by project: <owner>/<name>" (apps/web/src/components/Sidebar.tsx),
 //    and plain "Filter threads by project" when every project is shown.
+//    Its appearance is also the "ready" signal: the window keeps the page covered until
+//    T3 has drawn, so loading never flashes.
 // 2. Draws the Mission Control overlay when the app asks: the page blurred, with the
 //    folder's own icon (cloned from that same button) and its name on top.
 
@@ -23,7 +25,17 @@
     return label.startsWith(`${PREFIX}: `) ? label.slice(PREFIX.length + 2) : null;
   }
 
+  let readySent = false;
+
   function report() {
+    // T3's sidebar is on screen: the app has drawn, so the window can stop covering it.
+    // On "/" T3 is about to open a new draft; wait for that page rather than show both.
+    if (!readySent && scopeButton() && location.pathname !== "/") {
+      readySent = true;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => window.webkit.messageHandlers.t3pm.postMessage({ type: "ready" })),
+      );
+    }
     const scope = currentScope();
     // A collapsed sidebar removes the button; keep the last answer rather than "all projects".
     if (scope === undefined || scope === lastReported) return;

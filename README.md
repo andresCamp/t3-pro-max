@@ -13,6 +13,7 @@ It is a small native Mac app (Swift and WebKit) that runs next to the T3 Code de
 ## What it does
 
 - **Many windows.** Click **New window** in the title bar. Each window pairs with T3 Code by itself. You never see a pairing link or a QR code.
+- **New windows open ready.** The app keeps the next window paired and loaded out of sight, so **New window** shows T3 Code at once. A window that has to load shows a quiet loading screen until the page is drawn, never a half-loaded page.
 - **Each window keeps its own state.** Its project filter, sidebar, panels and drafts are separate from every other window's. Change the filter in one window and the others stay as they are.
 - **Windows come back.** Quit and reopen, and every window returns on the same display, at the same size, on the same thread, with the same filter and zoom.
 - **The title is the project.** A window filtered to a project is titled with that project's name, so the Window menu and the Dock tell your windows apart.
@@ -46,9 +47,9 @@ Then open **T3 Code Pro Max**. If T3 Code is not running, the window says so and
 ## How it works
 
 1. **Finding T3 Code.** The T3 Code desktop app runs a local server and writes its address to `~/.t3/userdata/server-runtime.json`. The app reads that file, so it follows T3 Code to whatever port it uses.
-2. **Pairing.** For each window, the app runs `t3 pair`, the command the T3 Code desktop app installs in `~/.t3/bin`. It creates a one-time pairing link, and the window signs in with it in the background. In T3 Code's settings each window appears as a connection named "T3 Code Pro Max" with a short id. A connection has the same access as T3 Code's own window, and you can revoke it there at any time.
+2. **Pairing.** For each window, the app runs `t3 pair`, the command the T3 Code desktop app installs in `~/.t3/bin`. It creates a one-time pairing link, and the window signs in with it in the background. In T3 Code's settings each window appears as a connection named "T3 Code Pro Max" with a short id. There is always one more connection than open windows: the window the app keeps ready for the next **New window**. A connection has the same access as T3 Code's own window, and you can revoke it there at any time.
 3. **Separate state.** Each window has its own WebKit storage, so T3 Code treats it as a separate browser. That storage stays on your Mac in `~/Library/WebKit/com.andrescampos.t3promax`.
-4. **Closing.** Closing a window with its close button signs out its connection in T3 Code and deletes its storage. Quitting the app (Cmd+Q) keeps every open window, so they all come back.
+4. **Closing.** Closing a window with its close button signs out its connection in T3 Code and deletes its storage. Quitting the app (Cmd+Q) keeps every open window, so they all come back. If the app stops before a window can clean up after itself, the next launch signs out every connection and deletes all storage that no open window uses.
 5. **Project name.** T3 Code labels its project filter button "Filter threads by project: owner/name". A small script in each window reads that label and sends it to the app, which uses it for the window title and for Mission Control. If a T3 Code update changes the label, windows fall back to the title "T3 Code Pro Max" and everything else keeps working.
 
 The app is not sandboxed, because the sandbox would block it from reading T3 Code's address file and running the `t3` command. The app connects only to the T3 Code server on your Mac. The page inside each window is T3 Code's own web client, unchanged.
