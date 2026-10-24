@@ -35,8 +35,23 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: com.andrescampos.t3promax
             CFBundleURLSchemes: [t3pm]
+    dependencies:
+      # The MCP server ships inside the app, beside its main executable.
+      - target: t3pm-mcp
+        embed: true
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.andrescampos.t3promax
         PRODUCT_NAME: T3 Code Pro Max
         CODE_SIGN_ENTITLEMENTS: App/T3ProMax.entitlements
+  t3pm-mcp:
+    type: tool
+    platform: macOS
+    sources:
+      - MCP
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrescampos.t3promax.mcp
+        PRODUCT_NAME: t3pm-mcp
