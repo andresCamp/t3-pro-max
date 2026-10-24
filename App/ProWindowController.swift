@@ -57,11 +57,6 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         observations.append(webView.observe(\.url, options: [.new]) { [weak self] web, _ in
             MainActor.assumeIsolated { self?.urlChanged(web.url) }
         })
-        observations.append(webView.observe(\.title, options: [.new]) { [weak self] web, _ in
-            MainActor.assumeIsolated {
-                if let title = web.title, !title.isEmpty { self?.window?.title = title }
-            }
-        })
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
