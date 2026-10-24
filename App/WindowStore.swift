@@ -13,6 +13,8 @@ struct WindowRecord: Codable, Equatable {
     var frame: String?
     /// True once this window's storage holds a session cookie.
     var paired: Bool = false
+    /// Page zoom set from the title bar control; nil is 100%.
+    var zoom: Double?
 }
 
 @MainActor

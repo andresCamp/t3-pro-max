@@ -25,21 +25,37 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     /// Called when the window closes for good (not when the app quits).
     var onClose: ((ProWindowController) -> Void)?
 
+    private let tools = TitlebarTools()
+    /// The sidebar's project filter, as T3 labels it ("owner/name"); nil when all projects show.
+    private(set) var scope: String?
+
+    static let defaultTitle = "T3 Code Pro Max"
+    /// Zoom steps, as in Safari.
+    private static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
+
     init(record: WindowRecord) {
         self.record = record
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: record.id)
         configuration.preferences.isElementFullscreenEnabled = true
+        let bridge = MessageProxy()
+        configuration.userContentController.add(bridge, name: "t3pm")
+        if let script = Bundle.main.url(forResource: "page-bridge", withExtension: "js")
+            .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }) {
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
+        webView.pageZoom = record.zoom ?? 1
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "T3 Code Pro Max"
+        window.title = Self.defaultTitle
         window.minSize = NSSize(width: 480, height: 360)
         window.tabbingIdentifier = "T3ProMax"
         window.isReleasedWhenClosed = false
@@ -49,7 +65,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        window.addTitlebarAccessoryViewController(NewWindowAccessory())
+        bridge.onMessage = { [weak self] body in self?.pageMessage(body) }
+        window.addTitlebarAccessoryViewController(tools)
+        tools.zoomLabel = Self.percent(webView.pageZoom)
+        tools.onZoom = { [weak self] step in self?.zoom(step) }
 
         waiting.onOpenT3 = { T3Server.openDesktopApp() }
         waiting.onRetry = { [weak self] in self?.pairAttempts = 0; self?.connect() }
@@ -152,6 +171,40 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         WindowStore.shared.upsert(record)
     }
 
+    // MARK: Folder title, zoom and Mission Control
+
+    /// Messages from page-bridge.js.
+    private func pageMessage(_ body: Any) {
+        guard let message = body as? [String: Any], message["type"] as? String == "scope" else { return }
+        scope = message["name"] as? String
+        // The title is the short name ("SalesAutomation-Project"); the owner shows in Mission Control.
+        window?.title = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Self.defaultTitle
+    }
+
+    /// -1 zooms out a step, +1 in, 0 back to 100%.
+    func zoom(_ step: Int) {
+        let steps = Self.zoomSteps
+        let current = steps.firstIndex { $0 >= webView.pageZoom - 0.001 } ?? steps.firstIndex(of: 1)!
+        let next = step == 0 ? 1 : steps[max(0, min(steps.count - 1, current + step))]
+        webView.pageZoom = next
+        tools.zoomLabel = Self.percent(next)
+        record.zoom = next == 1 ? nil : Double(next)
+        WindowStore.shared.upsert(record)
+    }
+
+    private static func percent(_ zoom: CGFloat) -> String { "\(Int((zoom * 100).rounded()))%" }
+
+    /// Shows or hides the folder overlay while Mission Control is open.
+    func setMissionControl(_ active: Bool) {
+        guard window?.contentView === webView else { return }
+        var argument: [String: Any] = ["show": active]
+        if active, let icon = NSApp.applicationIconImage.pngData(size: 240) {
+            argument["appIcon"] = "data:image/png;base64," + icon.base64EncodedString()
+        }
+        webView.callAsyncJavaScript("window.__t3pmOverlay && window.__t3pmOverlay(argument)",
+                                    arguments: ["argument": argument], in: nil, in: .page)
+    }
+
     // MARK: Control (used by the MCP server through AppDelegate)
 
     /// Shows a T3 page (path, query and fragment) in this window.
@@ -186,6 +239,8 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             "screen": window?.screen.flatMap { NSScreen.screens.firstIndex(of: $0) } ?? 0,
             "frame": ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height],
             "focused": window?.isKeyWindow ?? false,
+            "folder": scope ?? "",
+            "zoom": Double(webView.pageZoom),
             "connected": window?.contentView === webView && record.paired,
         ]
     }
@@ -280,20 +335,129 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     }
 }
 
-/// The "New Window" button in each window's title bar.
-final class NewWindowAccessory: NSTitlebarAccessoryViewController {
+/// The title bar's right side: a zoom pill (− 100% +) and a "New window" pill,
+/// drawn as Granola draws its "New note" button: a white capsule with a hairline border.
+@MainActor
+final class TitlebarTools: NSTitlebarAccessoryViewController {
+    var onZoom: (Int) -> Void = { _ in }
+    var zoomLabel = "100%" { didSet { percentButton?.title = zoomLabel } }
+    private var percentButton: NSButton?
+
     override func loadView() {
-        let button = NSButton(
-            image: NSImage(systemSymbolName: "macwindow.badge.plus", accessibilityDescription: "New Window")!,
-            target: nil, action: #selector(AppDelegate.newWindow(_:)))
-        button.bezelStyle = .texturedRounded
-        button.isBordered = false
-        button.toolTip = "New Window"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 28))
-        button.frame = NSRect(x: 6, y: 2, width: 28, height: 24)
-        container.addSubview(button)
-        view = container
+        let zoomOut = PillButton.make(symbol: "minus", title: nil, tooltip: "Zoom Out") { [weak self] in self?.onZoom(-1) }
+        let percent = PillButton.make(symbol: nil, title: zoomLabel, tooltip: "Actual Size") { [weak self] in self?.onZoom(0) }
+        percent.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        percent.contentTintColor = .secondaryLabelColor
+        percentButton = percent
+        let zoomIn = PillButton.make(symbol: "plus", title: nil, tooltip: "Zoom In") { [weak self] in self?.onZoom(1) }
+        let zoomPill = Capsule(views: [zoomOut, Divider(), percent, Divider(), zoomIn])
+
+        let newWindow = PillButton.make(symbol: "plus", title: "New window", tooltip: "New Window") {
+            (NSApp.delegate as? AppDelegate)?.newWindow(nil)
+        }
+        let newWindowPill = Capsule(views: [newWindow])
+
+        let row = NSStackView(views: [zoomPill, newWindowPill])
+        row.spacing = 8
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
+        row.frame.size = NSSize(width: row.fittingSize.width, height: 28)
+        view = row
         layoutAttribute = .trailing
+    }
+}
+
+/// A borderless button inside a pill, running a closure when clicked.
+final class PillButton: NSButton {
+    private var handler: () -> Void = {}
+
+    static func make(symbol: String?, title: String?, tooltip: String, handler: @escaping () -> Void) -> PillButton {
+        let button = PillButton()
+        button.handler = handler
+        button.isBordered = false
+        button.title = title ?? ""
+        button.font = .systemFont(ofSize: 12.5)
+        button.toolTip = tooltip
+        if let symbol {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            button.imagePosition = title == nil ? .imageOnly : .imageLeading
+            button.imageHugsTitle = true
+        }
+        button.contentTintColor = .labelColor
+        button.target = button
+        button.action = #selector(fire)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: title == nil ? 26 : 0).isActive = true
+        return button
+    }
+
+    @objc private func fire() { handler() }
+
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        if !title.isEmpty { size.width += 18 }
+        return size
+    }
+}
+
+/// White capsule with a hairline border holding a row of pill buttons.
+final class Capsule: NSStackView {
+    convenience init(views: [NSView]) {
+        self.init()
+        views.forEach(addArrangedSubview)
+        spacing = 0
+        edgeInsets = NSEdgeInsets(top: 0, left: 2, bottom: 0, right: 2)
+        wantsLayer = true
+        layer?.cornerRadius = 13
+        layer?.borderWidth = 1
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 26).isActive = true
+        updateLayer()
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // Resolve the dynamic colors for the current appearance (light or dark).
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() { updateLayer() }
+}
+
+/// The hairline between buttons in the zoom pill.
+final class Divider: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 1).isActive = true
+        heightAnchor.constraint(equalToConstant: 26).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
+/// Holds the page's message handler weakly: WKUserContentController retains its
+/// handlers, so the window controller registering itself would never be freed.
+final class MessageProxy: NSObject, WKScriptMessageHandler {
+    var onMessage: (Any) -> Void = { _ in }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        onMessage(message.body)
     }
 }
 
@@ -310,6 +474,18 @@ extension URL {
 extension NSImage {
     var pngData: Data? {
         guard let tiff = tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    /// A PNG of the image drawn at `size` by `size` pixels.
+    func pngData(size: Int) -> Data? {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+        NSGraphicsContext.restoreGraphicsState()
         return rep.representation(using: .png, properties: [:])
     }
 }

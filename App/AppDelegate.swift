@@ -8,10 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [ProWindowController] = []
     /// True while quitting, so closing windows keeps them for next launch instead of forgetting them.
     private(set) var isTerminating = false
+    private let missionControl = MissionControlWatcher()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
         ControlServer.start { [unowned self] request in await self.handle(request) }
+        missionControl.onChange = { [unowned self] active in
+            controllers.forEach { $0.setMissionControl(active) }
+        }
+        missionControl.start()
         let saved = WindowStore.shared.records
         if saved.isEmpty {
             openWindow()
@@ -97,6 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let path = await resolvePath(request) else { return fail("Give a path, url or thread_id.") }
             target.navigate(path: path)
             return ["ok": true]
+
+        case "zoom_window":
+            guard let target else { return fail("No window with that id.") }
+            target.zoom(request["step"] as? Int ?? 0)
+            return ["ok": true, "window": target.summary]
 
         case "close_window":
             guard let target else { return fail("No window with that id.") }
