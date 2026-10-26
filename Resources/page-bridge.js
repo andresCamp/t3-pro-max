@@ -8,6 +8,10 @@
 //    T3 has drawn, so loading never flashes.
 // 2. Draws the Mission Control overlay when the app asks: the page blurred, with the
 //    folder's own icon (cloned from that same button) and its name on top.
+// 3. Gives the page a `Notification`. WKWebView has none, so T3 skipped its "Thread
+//    completed" and "Input needed" notifications in these windows. This one hands each
+//    notification to the app, which shows it as its own and, on a click, runs the click
+//    handler T3 attached (see Notifier.swift).
 
 (() => {
   const PREFIX = "Filter threads by project";
@@ -57,6 +61,49 @@
     attributeFilter: ["aria-label"],
   });
   report();
+
+  // T3 builds a notification with `new Notification(title, { body, tag })`, listens for
+  // "click", and calls close() when it replaces or clears one. The tag names the thread.
+  const notifications = new Map();
+  let lastNotification = 0;
+
+  class ProNotification extends EventTarget {
+    static get permission() {
+      return "granted";
+    }
+    static requestPermission(callback) {
+      callback?.("granted");
+      return Promise.resolve("granted");
+    }
+    constructor(title, options = {}) {
+      super();
+      this.title = String(title);
+      this.body = options.body ?? "";
+      this.tag = options.tag ?? "";
+      this.onclick = null;
+      this.id = ++lastNotification;
+      notifications.set(this.id, this);
+      window.webkit.messageHandlers.t3pm.postMessage({
+        type: "notify", id: this.id, title: this.title, body: this.body, tag: this.tag,
+      });
+    }
+    close() {
+      if (!notifications.delete(this.id)) return;
+      window.webkit.messageHandlers.t3pm.postMessage({ type: "notify-close", id: this.id, tag: this.tag });
+    }
+  }
+
+  Object.defineProperty(window, "Notification", { configurable: true, writable: true, value: ProNotification });
+
+  /** Runs T3's click handler for one notification. False when the page no longer has it. */
+  window.__t3pmNotificationClick = (id) => {
+    const notification = notifications.get(id);
+    if (!notification) return false;
+    const event = new Event("click");
+    notification.dispatchEvent(event);
+    notification.onclick?.(event);
+    return true;
+  };
 
   const OVERLAY_ID = "t3pm-mission-control";
 

@@ -19,6 +19,7 @@ It is a small native Mac app (Swift and WebKit) that runs next to the T3 Code de
 - **Windows come back.** Quit and reopen, and every window returns on the same display, at the same size, on the same thread, with the same filter and zoom.
 - **The title is the project.** A window filtered to a project is titled with that project's name, so the Window menu and the Dock tell your windows apart.
 - **Mission Control shows the project.** Open Mission Control (F3 on most Mac keyboards) and each window shows its project's icon and name over a blurred page, so you can pick the right one at a glance. It disappears as soon as you choose.
+- **Notifications open the right window.** When a thread finishes or needs you, the notification comes from T3 Code Pro Max, one per event however many windows are open. Clicking it opens the thread in the window that fits: the window showing that thread, else a window that showed it before, else a window filtered to the thread's project, else a new window. Windows use T3 Code's own notification setting.
 - **Zoom per window.** The zoom control in the title bar goes from 50% to 200%. Click the percentage to reset to 100%.
 - **Agents can arrange windows.** A built-in MCP server lets Claude Code, Codex or any MCP client open, move, tile, zoom and screenshot windows (see below).
 
@@ -45,13 +46,19 @@ This needs Xcode. The `CODE_SIGN_IDENTITY=-` setting signs the app for your own 
 
 Then open **T3 Code Pro Max**. If T3 Code is not running, the window says so and offers to open it, then connects by itself.
 
+Two one-time steps for notifications:
+
+1. When macOS asks whether T3 Code Pro Max may send notifications, click **Allow**. The question comes with the first notification.
+2. In **System Settings → Notifications**, turn off notifications for **T3 Code**. Otherwise you get each one twice, and T3 Code's copy opens the T3 Code app. Its in-app toasts and its chime are unaffected.
+
 ## How it works
 
 1. **Finding T3 Code.** The T3 Code desktop app runs a local server and writes its address to `~/.t3/userdata/server-runtime.json`. The app reads that file, so it follows T3 Code to whatever port it uses.
 2. **Pairing.** For each window, the app runs `t3 pair`, the command the T3 Code desktop app installs in `~/.t3/bin`. It creates a one-time pairing link, and the window signs in with it in the background. In T3 Code's settings each window appears as a connection named "T3 Code Pro Max" with a short id. There is always one more connection than open windows: the window the app keeps ready for the next new window. A connection has the same access as T3 Code's own window, and you can revoke it there at any time.
 3. **Separate state.** Each window has its own WebKit storage, so T3 Code treats it as a separate browser. That storage stays on your Mac in `~/Library/WebKit/com.andrescampos.t3promax`.
 4. **Closing.** Closing a window with its close button signs out its connection in T3 Code and deletes its storage. Quitting the app (Cmd+Q) keeps every open window, so they all come back. If the app stops before a window can clean up after itself, the next launch signs out every connection and deletes all storage that no open window uses.
-5. **Project name.** T3 Code labels its project filter button "Filter threads by project: owner/name". A small script in each window reads that label and sends it to the app, which uses it for the window title and for Mission Control. If a T3 Code update changes the label, windows fall back to the title "T3 Code Pro Max" and everything else keeps working.
+5. **Notifications.** T3 Code's web client raises a browser notification when a thread finishes or needs input, but WKWebView has no notifications, so these windows used to raise none. Each window now gives the page one, and the app shows what the page raises as its own notification. Every window that is not focused raises the same one; T3 tags it with a hash of the thread, so the app shows one per tag. To find the thread behind a tag, the app hashes the threads in T3 Code's database (`~/.t3/userdata/statev2.sqlite`, read only) and compares. It reads each window's project filter from the window's storage, where T3 keys it by git repository (`github.com/owner/repo`) or by folder. The windows take T3 Code's notification setting from `~/.t3/userdata/client-settings.json` each time a page loads, without the chime: T3 Code plays that itself, so it sounds once. If a T3 Code update changes the database, a click still finds a window showing the thread, and otherwise does what T3 does in the window that raised it.
+6. **Project name.** T3 Code labels its project filter button "Filter threads by project: owner/name". A small script in each window reads that label and sends it to the app, which uses it for the window title and for Mission Control. If a T3 Code update changes the label, windows fall back to the title "T3 Code Pro Max" and everything else keeps working.
 
 The app is not sandboxed, because the sandbox would block it from reading T3 Code's address file and running the `t3` command. The app connects only to the T3 Code server on your Mac. The page inside each window is T3 Code's own web client, unchanged.
 

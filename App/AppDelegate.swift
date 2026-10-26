@@ -1,5 +1,6 @@
 // App entry point: restores last session's windows, opens new ones, builds the menus,
-// and handles t3pm:// links (t3pm://open?path=/<environment>/<thread>).
+// handles t3pm:// links (t3pm://open?path=/<environment>/<thread>), and sends a
+// notification click to the window that fits (see Notifier).
 
 import AppKit
 import WebKit
@@ -12,6 +13,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let missionControl = MissionControlWatcher()
     /// The next New Window, already paired and loaded (see `prepareSpare`).
     private var spare: ProWindowController?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Notifier.shared.onClick = { [unowned self] tag, delivered in
+            Task { await openNotification(tag: tag, delivered) }
+        }
+        Notifier.shared.start()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
@@ -124,10 +132,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A click on a window's tab: brings it forward, from the Dock or another Space too.
     private func select(_ id: UUID) {
-        guard let window = controllers.first(where: { $0.record.id == id })?.window else { return }
+        guard let controller = controllers.first(where: { $0.record.id == id }) else { return }
+        bringForward(controller)
+    }
+
+    private func bringForward(_ controller: ProWindowController) {
+        guard let window = controller.window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+
+    /// A click on a notification (see Notifier): opens its thread in the window that fits,
+    /// in order: the window showing it, a window that showed it before, a window filtered
+    /// to its project, else a new window. Ties go to the window used last.
+    private func openNotification(tag: String, _ delivered: Notifier.Delivered) async {
+        let windows = controllers.sorted { $0.lastActive > $1.lastActive }
+        if let showing = windows.first(where: { $0.currentThread == tag }) {
+            bringForward(showing)
+            return
+        }
+        var target = windows.first { $0.visitedThreads.contains(tag) }
+        if target == nil, let project = delivered.project {
+            let repository = await project.repositoryKey()
+            for window in windows {
+                if let filter = await window.projectFilter(), project.shown(byFilter: filter, repository: repository) {
+                    target = window
+                    break
+                }
+            }
+        }
+        if let target {
+            bringForward(target)
+            if let pageID = delivered.senders[target.record.id] {
+                target.clickNotification(pageID, otherwise: delivered.path)
+            } else if let path = delivered.path {
+                target.navigate(path: path)
+            }
+            return
+        }
+        if let path = delivered.path {
+            openWindow(path: path)
+            NSApp.activate()
+            return
+        }
+        // Not a thread the app could find (T3's database changed, or a guide notification):
+        // T3's own handler, in the window that raised it and was used last.
+        if let sender = windows.first(where: { delivered.senders[$0.record.id] != nil }),
+           let pageID = delivered.senders[sender.record.id] {
+            bringForward(sender)
+            sender.clickNotification(pageID, otherwise: nil)
+        }
     }
 
     /// Starts the next spare window: it pairs and loads T3 hidden, so the next New Window
@@ -189,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { return fail("No windows are open.") }
             guard let png = await target.snapshot() else { return fail("Couldn't capture the window.") }
             return ["ok": true, "id": target.record.id.uuidString, "png_base64": png.base64EncodedString()]
+
 
         default:
             return fail("Unknown command \(command).")

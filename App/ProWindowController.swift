@@ -43,6 +43,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     private var scopeKnown = false
     /// The filtered project's icon, as T3's sidebar draws it.
     private var icon: NSImage?
+    /// When the window last became key, to pick the most recently used window.
+    private(set) var lastActive = Date.distantPast
+    /// Tags (see ThreadIndex) of every thread this window has shown since launch.
+    private(set) var visitedThreads: Set<String> = []
 
     static let defaultTitle = "T3 Code Pro Max"
     /// Zoom steps, as in Safari.
@@ -62,6 +66,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }) {
             configuration.userContentController.addUserScript(
                 WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
+        if let settings = Notifier.settingsScript() {
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: settings, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isInspectable = true
@@ -171,7 +179,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     /// Where this window's pages live: the address it is signed in on, once it has a page.
     private var pageOrigin: URL? {
-        guard let url = webView.url, url.scheme?.hasPrefix("http") == true, let host = url.host else {
+        guard let url = webView.url ?? record.url.flatMap(URL.init(string:)), url.scheme?.hasPrefix("http") == true, let host = url.host else {
             return T3Server.origin()
         }
         return URL(string: "\(url.scheme!)://\(host)\(url.port.map { ":\($0)" } ?? "")")
@@ -231,6 +239,12 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         guard let url, url.scheme?.hasPrefix("http") == true, !url.path.hasPrefix("/pair") else { return }
         record.url = url.absoluteString
         persist()
+        if let thread = ThreadIndex.tag(page: url) { visitedThreads.insert(thread) }
+    }
+
+    /// The tag of the thread this window shows, nil when it shows no thread.
+    var currentThread: String? {
+        ThreadIndex.tag(page: webView.url ?? record.url.flatMap(URL.init(string:)))
     }
 
     // MARK: Folder title, zoom and Mission Control
@@ -273,6 +287,16 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         if message["type"] as? String == "ready" {
             pageReady = true
             if finalPage { reveal() }
+            return
+        }
+        if let type = message["type"] as? String, type.hasPrefix("notify"),
+           let id = message["id"] as? Int, let tag = message["tag"] as? String {
+            if type == "notify" {
+                Notifier.shared.post(from: record.id, pageID: id, title: message["title"] as? String ?? "",
+                                     body: message["body"] as? String ?? "", tag: tag)
+            } else {
+                Notifier.shared.close(from: record.id, pageID: id, tag: tag)
+            }
             return
         }
         guard message["type"] as? String == "scope" else { return }
@@ -376,11 +400,36 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         guard let origin = pageOrigin,
               let url = URL(string: origin.absoluteString.trimmingSuffix("/") + path) else { return }
         if record.paired {
+            // Saved first: a window still connecting loads its saved page when it gets there.
+            record.url = url.absoluteString
+            persist()
             webView.load(URLRequest(url: url))
         } else {
             pendingPath = path
         }
     }
+
+    /// The key of the project filter in the sidebar (see ThreadIndex.Project), nil when
+    /// the window shows every project. T3 keeps it in the page's own storage.
+    func projectFilter() async -> String? {
+        let script = """
+            const state = JSON.parse(localStorage.getItem("t3code:ui-state:v1") ?? "null");
+            return state?.sidebarProjectScopeKey ?? null;
+            """
+        return try? await webView.callAsyncJavaScript(script, contentWorld: .page) as? String
+    }
+
+    /// Runs T3's own click handler for a notification this page raised, which opens its
+    /// thread without reloading the page. Loads `path` instead if the page no longer has it.
+    func clickNotification(_ pageID: Int, otherwise path: String?) {
+        Task {
+            let handled = try? await webView.callAsyncJavaScript(
+                "return window.__t3pmNotificationClick ? window.__t3pmNotificationClick(id) : false",
+                arguments: ["id": pageID], in: nil, contentWorld: .page) as? Bool
+            if handled != true, let path { navigate(path: path) }
+        }
+    }
+
 
     /// A PNG of the whole window: the title bar with its tabs, and the web page or the
     /// waiting screen under it. WebKit draws the page only through its own snapshot.
@@ -478,6 +527,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     // MARK: Window lifecycle
 
+    func windowDidBecomeKey(_ notification: Notification) { lastActive = Date() }
     func windowDidMove(_ notification: Notification) { saveFrame() }
     func windowDidResize(_ notification: Notification) {
         saveFrame()
