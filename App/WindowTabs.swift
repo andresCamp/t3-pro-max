@@ -48,8 +48,7 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
     private let plus = NSHostingView(rootView: NewWindowButton())
     private static let plusWidth: CGFloat = 30
     private let name = NSTextField(labelWithString: ProWindowController.defaultTitle)
-    private let rule = NSBox()
-    /// Where the scrolling tabs start: after the name and the hairline.
+    /// Where the scrolling tabs start: after the name.
     private var tabsStart: CGFloat = 0
     private let fade = CAGradientLayer()
     private var subscription: AnyCancellable?
@@ -73,10 +72,7 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
         name.sizeToFit()
         name.frame.origin = NSPoint(x: 4, y: (15.5 - name.frame.height / 2).rounded())
         container.addSubview(name)
-        rule.boxType = .separator
-        rule.frame = NSRect(x: name.frame.maxX + 10, y: 7.5, width: 1, height: 16)
-        container.addSubview(rule)
-        tabsStart = rule.frame.maxX + 8
+        tabsStart = name.frame.maxX + 12
         row.sceneBridgingOptions = []
         row.sizingOptions = []
         scroll.frame = container.bounds
