@@ -75,6 +75,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.title = Self.defaultTitle
         // The tab strip names the window instead; the title still shows in the Window menu.
         window.titleVisibility = .hidden
+        // No line between the title bar and the page: a transparent title bar draws none
+        // (the separator style alone still left it). The page stays below the bar.
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.minSize = NSSize(width: 480, height: 360)
         window.tabbingIdentifier = "T3ProMax"
         window.isReleasedWhenClosed = false
