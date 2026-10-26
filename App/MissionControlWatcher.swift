@@ -1,6 +1,7 @@
 // Tells the app when Mission Control (or App Exposé) opens and closes, so each window
 // can show which folder it holds. macOS has no public notification for this. While
-// Mission Control is open the Dock puts up full-screen windows at layers 18 and 20,
+// Mission Control is open the Dock puts up a full-screen window at layer 18 (besides
+// layer-20 ones, which hovering the Dock also shows),
 // and window owners and layers are readable without Screen Recording permission,
 // so a light poll of the window list finds it.
 //
@@ -103,9 +104,11 @@ final class MissionControlWatcher {
         return windows.contains { window in
             guard window[kCGWindowOwnerName as String] as? String == "Dock",
                   let layer = window[kCGWindowLayer as String] as? Int else { return false }
-            // The Dock's own bar and the wallpaper sit at other layers; 18 and 20 appear only
-            // while Mission Control or App Exposé is showing.
-            return layer == 18 || layer == 20
+            // Mission Control puts up a full-screen Dock window at layer 18 beside its layer-20
+            // ones. Layer 20 alone is not enough: hovering the Dock or the menu bar shows a
+            // single layer-20 window too (measured 26 Oct 2026), and that must not count.
+            return layer == 18
+
         }
     }
 }
