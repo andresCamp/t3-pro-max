@@ -1,7 +1,8 @@
 // The tab strip in every window's title bar: one tab per open window, named by its
 // project, with the project's icon from T3's sidebar. The window's own tab is raised,
 // so the strip doubles as the title. Clicking a tab brings that window forward, its ×
-// (on hover) closes it, and the + after the last tab opens a new one.
+// (on hover) closes it, the + after the last tab opens a new one, and dragging a tab
+// reorders the windows, in every window's strip and for the next launch.
 //
 // These are not macOS window tabs (`NSWindow` tabbing merges windows into one frame,
 // and each window here lives on its own display or Space).
@@ -20,9 +21,11 @@ final class WindowTabs: ObservableObject {
         var icon: NSImage?
     }
 
-    /// In the order the windows were opened.
+    /// In the order the windows were opened, or as dragged since.
     @Published var tabs: [Tab] = []
     var onSelect: (UUID) -> Void = { _ in }
+    /// A tab dropped at a new index.
+    var onMove: (UUID, Int) -> Void = { _, _ in }
     var onClose: (UUID) -> Void = { _ in }
     var onNew: () -> Void = {}
 
@@ -43,13 +46,14 @@ final class WindowTabs: ObservableObject {
 final class TitlebarTabs: NSTitlebarAccessoryViewController {
     private let current: UUID
     private let scroll = NSScrollView()
-    private lazy var row = NSHostingView(rootView: LiveTabRow(model: WindowTabs.shared, current: current))
+    private lazy var scroller = DragScroller(scroll: scroll)
+    private lazy var row = TabsHostingView(rootView: LiveTabRow(model: WindowTabs.shared, current: current, scroller: scroller))
     private let more = NSImageView()
-    private let plus = NSHostingView(rootView: NewWindowButton())
+    private let plus = TabsHostingView(rootView: NewWindowButton())
     private static let plusWidth: CGFloat = 30
     private let name = NSTextField(labelWithString: ProWindowController.defaultTitle)
     /// The fixed first tab, to the T3 Code app; nil when that app isn't installed.
-    private let home: NSHostingView<HomeTab>? = HomeTab.appURL.map { NSHostingView(rootView: HomeTab(app: $0)) }
+    private let home: TabsHostingView<HomeTab>? = HomeTab.appURL.map { TabsHostingView(rootView: HomeTab(app: $0)) }
     /// Where the scrolling tabs start: after the name and the home tab.
     private var tabsStart: CGFloat = 0
     private let fade = CAGradientLayer()
@@ -112,10 +116,17 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
         container.addSubview(plus)
         view = container
 
-        subscription = WindowTabs.shared.$tabs.sink { [weak self] _ in
-            // After the publish lands, so the row has drawn the new tabs.
-            DispatchQueue.main.async { self?.onContentWidth() }
-        }
+        subscription = WindowTabs.shared.$tabs
+            // A reorder keeps the width, and refitting would scroll away from the dropped tab.
+            .removeDuplicates { Self.byID($0) == Self.byID($1) }
+            .sink { [weak self] _ in
+                // After the publish lands, so the row has drawn the new tabs.
+                DispatchQueue.main.async { self?.onContentWidth() }
+            }
+    }
+
+    private static func byID(_ tabs: [WindowTabs.Tab]) -> [UUID: String] {
+        Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.name) })
     }
 
     /// The full width of `tabs` side by side (the live row has no size of its own).
@@ -169,37 +180,155 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
 private struct LiveTabRow: View {
     @ObservedObject var model: WindowTabs
     let current: UUID
+    let scroller: DragScroller
 
     var body: some View {
-        TabRow(tabs: model.tabs, current: current, onSelect: model.onSelect, onClose: model.onClose)
+        TabRow(tabs: model.tabs, current: current, onSelect: model.onSelect, onClose: model.onClose,
+               onMove: model.onMove, scroller: scroller)
             .frame(maxHeight: .infinity)
             // In line with the window buttons, which sit a little above the bar's middle.
             .padding(.bottom, 3)
     }
 }
 
-/// The tabs side by side, at their full width.
+/// Host for the title bar's tabs and buttons. A drag on the title bar moves the window
+/// unless the view under the pointer says otherwise: a drag on a tab reorders the tabs,
+/// and a press on a button that slips a little should not carry the window off.
+final class TabsHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { false }
+}
+
+/// While a tab is dragged, scrolls the strip when the pointer nears either edge, and
+/// says how far the tab has travelled along the row: the pointer's own movement plus
+/// any scrolling, so the tab stays under the pointer as the row moves beneath it.
+@MainActor
+final class DragScroller {
+    private weak var scroll: NSScrollView?
+    private var startPointer: CGFloat = 0
+    private var startOffset: CGFloat = 0
+
+    init(scroll: NSScrollView) { self.scroll = scroll }
+
+    private var offset: CGFloat { scroll?.contentView.bounds.minX ?? 0 }
+
+    func begin() {
+        startPointer = NSEvent.mouseLocation.x
+        startOffset = offset
+    }
+
+    func travel() -> CGFloat {
+        let pointer = NSEvent.mouseLocation
+        if let scroll, let window = scroll.window, let document = scroll.documentView {
+            let x = scroll.convert(window.convertPoint(fromScreen: pointer), from: nil).x
+            let edge: CGFloat = 32, width = scroll.bounds.width
+            let step = x < edge ? -(edge - x) / 2 : x > width - edge ? (x - (width - edge)) / 2 : 0
+            if step != 0 {
+                let limit = max(0, document.frame.width - width)
+                scroll.contentView.scroll(to: NSPoint(x: min(max(0, offset + step), limit), y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+        return (pointer.x - startPointer) + (offset - startOffset)
+    }
+}
+
+/// The tabs side by side, at their full width. With `onMove`, a tab can be dragged:
+/// it lifts and follows the pointer, the others slide aside to open a gap, and on
+/// release it settles into the gap before the order changes.
 struct TabRow: View {
     let tabs: [WindowTabs.Tab]
     let current: UUID
     var onSelect: (UUID) -> Void = { _ in }
     var onClose: (UUID) -> Void = { _ in }
+    var onMove: ((UUID, Int) -> Void)? = nil
+    var scroller: DragScroller? = nil
+
+    private static let spacing: CGFloat = 2
+    private static let slide = Animation.spring(response: 0.24, dampingFraction: 0.86)
+    @State private var widths: [UUID: CGFloat] = [:]
+    @State private var dragged: UUID?
+    @State private var dragX: CGFloat = 0
+    /// Where the dragged tab would land if dropped now.
+    @State private var gap = 0
+    /// True from a drag's release until the order changes, so the release is not also a click.
+    @State private var settling = false
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(tabs) { tab in
-                TabButton(tab: tab, isCurrent: tab.id == current,
-                          select: { onSelect(tab.id) }, close: { onClose(tab.id) })
+        HStack(spacing: Self.spacing) {
+            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                TabButton(tab: tab, isCurrent: tab.id == current, isLifted: dragged == tab.id,
+                          select: { if dragged == nil, !settling { onSelect(tab.id) } },
+                          close: { onClose(tab.id) })
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { widths[tab.id] = $0 }
+                    .offset(x: shift(of: index, tab.id))
+                    .zIndex(dragged == tab.id ? 1 : 0)
+                    .simultaneousGesture(drag(tab.id, from: index), including: onMove == nil ? .subviews : .all)
                     .id(tab.id)
             }
         }
         .padding(.horizontal, 2)
+    }
+
+    private func width(_ index: Int) -> CGFloat { widths[tabs[index].id] ?? 0 }
+
+    /// The left edge of the tab at `index` in the current order.
+    private func start(_ index: Int) -> CGFloat {
+        (0..<index).reduce(0) { $0 + width($1) + Self.spacing }
+    }
+
+    private func shift(of index: Int, _ id: UUID) -> CGFloat {
+        guard let dragged, let from = tabs.firstIndex(where: { $0.id == dragged }) else { return 0 }
+        if id == dragged { return dragX }
+        let room = width(from) + Self.spacing
+        if from < gap, index > from, index <= gap { return -room }
+        if from > gap, index < from, index >= gap { return room }
+        return 0
+    }
+
+    private func drag(_ id: UUID, from index: Int) -> some Gesture {
+        // A press that doesn't move is a click on the tab.
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if dragged == nil {
+                    scroller?.begin()
+                    dragged = id
+                    gap = index
+                }
+                guard dragged == id else { return }
+                let travel = scroller?.travel() ?? value.translation.width
+                let total = start(tabs.count - 1) + width(tabs.count - 1)
+                dragX = min(max(travel, -start(index)), total - start(index) - width(index))
+                // Lands after every other tab whose middle the dragged tab's middle has passed.
+                let middle = start(index) + width(index) / 2 + dragX
+                let landing = tabs.indices.filter { $0 != index && start($0) + width($0) / 2 < middle }.count
+                if landing != gap { withAnimation(Self.slide) { gap = landing } }
+            }
+            .onEnded { _ in
+                guard dragged == id else { return }
+                let to = gap
+                settling = true
+                // Settle into the gap first, then change the order with nothing left to move.
+                let landed = to > index ? start(to) + width(to) - start(index) - width(index)
+                    : to < index ? start(to) - start(index) : 0
+                withAnimation(Self.slide) { dragX = landed }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    var instant = Transaction()
+                    instant.disablesAnimations = true
+                    withTransaction(instant) {
+                        dragged = nil
+                        dragX = 0
+                        if to != index { onMove?(id, to) }
+                    }
+                    settling = false
+                }
+            }
     }
 }
 
 private struct TabButton: View {
     let tab: WindowTabs.Tab
     let isCurrent: Bool
+    var isLifted = false
     let select: () -> Void
     let close: () -> Void
     @State private var hovering = false
@@ -234,8 +363,8 @@ private struct TabButton: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(hovering ? 1 : 0)
-            .disabled(!hovering)
+            .opacity(hovering && !isLifted ? 1 : 0)
+            .disabled(!hovering || isLifted)
             .onHover { hoveringClose = $0 }
             .help("Close the \(tab.name) window")
             .padding(.trailing, 5)
@@ -243,7 +372,7 @@ private struct TabButton: View {
         .frame(height: 24)
         .background {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isCurrent ? Color(nsColor: .controlBackgroundColor)
+                .fill(isCurrent || isLifted ? Color(nsColor: .controlBackgroundColor)
                       : hovering ? Color.primary.opacity(0.06) : .clear)
                 .overlay {
                     if isCurrent {
@@ -251,7 +380,9 @@ private struct TabButton: View {
                             .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
                     }
                 }
-                .shadow(color: .black.opacity(isCurrent ? 0.06 : 0), radius: 1, y: 1)
+                // Lifted while dragged: a deeper shadow, so it reads as held above the row.
+                .shadow(color: .black.opacity(isLifted ? 0.18 : isCurrent ? 0.06 : 0),
+                        radius: isLifted ? 6 : 1, y: isLifted ? 3 : 1)
         }
         .onHover { hovering = $0 }
     }

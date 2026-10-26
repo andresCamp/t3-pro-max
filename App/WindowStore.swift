@@ -45,6 +45,17 @@ final class WindowStore {
         save()
     }
 
+    /// Puts the records in the windows' tab order, so they reopen in it.
+    func reorder(_ ids: [UUID]) {
+        let rank = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
+        let sorted = records.enumerated().sorted {
+            (rank[$0.element.id] ?? ids.count + $0.offset, $0.offset) < (rank[$1.element.id] ?? ids.count + $1.offset, $1.offset)
+        }.map(\.element)
+        guard sorted != records else { return }
+        records = sorted
+        save()
+    }
+
     func remove(_ id: UUID) {
         records.removeAll { $0.id == id }
         save()

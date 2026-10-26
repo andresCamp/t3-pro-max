@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controllers.first { $0.record.id == id }?.window?.performClose(nil)
         }
         WindowTabs.shared.onNew = { [unowned self] in openWindow() }
+        WindowTabs.shared.onMove = { [unowned self] id, index in move(id, to: index) }
         let saved = WindowStore.shared.records
         if saved.isEmpty {
             openWindow()
@@ -128,6 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func listTabs() {
         WindowTabs.shared.tabs = controllers.map(\.tab)
+    }
+
+    /// A tab dropped at a new place: every window's strip follows, and so does the next launch.
+    private func move(_ id: UUID, to index: Int) {
+        guard let from = controllers.firstIndex(where: { $0.record.id == id }) else { return }
+        controllers.insert(controllers.remove(at: from), at: min(index, controllers.count))
+        listTabs()
+        WindowStore.shared.reorder(controllers.map(\.record.id))
     }
 
     /// A click on a window's tab: brings it forward, from the Dock or another Space too.

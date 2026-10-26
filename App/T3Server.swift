@@ -72,9 +72,19 @@ enum T3Server {
         guard let line = output.split(separator: "\n").first(where: { $0.hasPrefix("Pairing URL:") }),
               let url = URL(string: line.dropFirst("Pairing URL:".count).trimmingCharacters(in: .whitespaces))
         else {
-            throw PairingFailed(message: "T3 Code didn't return a pairing link.")
+            let reason = failureReason(output).map { " \($0)" } ?? ""
+            throw PairingFailed(message: "T3 Code didn't return a pairing link.\(reason)")
         }
         return url
+    }
+
+    /// The message of a failed CLI command. The CLI logs failures on stdout as
+    /// "[16:03:25.537] ERROR (#2): NoRunningServerError: No running T3 Code server found.",
+    /// and this returns the part after the error's type name.
+    static func failureReason(_ output: String) -> String? {
+        guard let match = output.firstMatch(of: #/ERROR \(\#\d+\): (?:\w+Error: )?(.+)/#) else { return nil }
+        let reason = match.1.trimmingCharacters(in: .whitespaces)
+        return reason.isEmpty ? nil : reason
     }
 
     /// Revokes every session labelled for this window. Best effort: a session that
