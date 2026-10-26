@@ -20,6 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controllers.forEach { $0.setMissionControl(active) }
         }
         missionControl.start()
+        WindowTabs.shared.onSelect = { [unowned self] id in select(id) }
+        WindowTabs.shared.onClose = { [unowned self] id in
+            controllers.first { $0.record.id == id }?.window?.performClose(nil)
+        }
+        WindowTabs.shared.onNew = { [unowned self] in openWindow() }
         let saved = WindowStore.shared.records
         if saved.isEmpty {
             openWindow()
@@ -104,9 +109,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func present(_ controller: ProWindowController) {
-        controller.onClose = { [weak self] closed in self?.controllers.removeAll { $0 === closed } }
+        controller.onClose = { [weak self] closed in
+            self?.controllers.removeAll { $0 === closed }
+            self?.listTabs()
+        }
         controllers.append(controller)
+        listTabs()
         controller.showWindow(nil)
+    }
+
+    private func listTabs() {
+        WindowTabs.shared.tabs = controllers.map(\.tab)
+    }
+
+    /// A click on a window's tab: brings it forward, from the Dock or another Space too.
+    private func select(_ id: UUID) {
+        guard let window = controllers.first(where: { $0.record.id == id })?.window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
     }
 
     /// Starts the next spare window: it pairs and loads T3 hidden, so the next New Window
@@ -258,7 +279,12 @@ enum MainMenu {
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         add(edit, titled: "Edit", to: main)
 
+        // No shortcuts: T3 may use Cmd +/- itself. The title bar's zoom pill does the same.
         let view = NSMenu(title: "View")
+        view.addItem(withTitle: "Actual Size", action: #selector(ProWindowController.actualSizePage(_:)), keyEquivalent: "")
+        view.addItem(withTitle: "Zoom In", action: #selector(ProWindowController.zoomInPage(_:)), keyEquivalent: "")
+        view.addItem(withTitle: "Zoom Out", action: #selector(ProWindowController.zoomOutPage(_:)), keyEquivalent: "")
+        view.addItem(.separator())
         let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.command, .control]
         add(view, titled: "View", to: main)

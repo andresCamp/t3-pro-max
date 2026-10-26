@@ -36,8 +36,13 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     var onClose: ((ProWindowController) -> Void)?
 
     private let tools = TitlebarTools()
+    private let tabStrip: TitlebarTabs
     /// The sidebar's project filter, as T3 labels it ("owner/name"); nil when all projects show.
     private(set) var scope: String?
+    /// The page has reported its filter at least once, so a nil `scope` means all projects.
+    private var scopeKnown = false
+    /// The filtered project's icon, as T3's sidebar draws it.
+    private var icon: NSImage?
 
     static let defaultTitle = "T3 Code Pro Max"
     /// Zoom steps, as in Safari.
@@ -46,6 +51,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     init(record: WindowRecord, spare: Bool = false) {
         self.record = record
         isSpare = spare
+        tabStrip = TitlebarTabs(current: record.id)
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: record.id)
@@ -67,6 +73,8 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = Self.defaultTitle
+        // The tab strip names the window instead; the title still shows in the Window menu.
+        window.titleVisibility = .hidden
         window.minSize = NSSize(width: 480, height: 360)
         window.tabbingIdentifier = "T3ProMax"
         window.isReleasedWhenClosed = false
@@ -94,6 +102,8 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         webView.uiDelegate = self
         bridge.onMessage = { [weak self] body in self?.pageMessage(body) }
         window.addTitlebarAccessoryViewController(tools)
+        window.addTitlebarAccessoryViewController(tabStrip)
+        tabStrip.onContentWidth = { [weak self] in self?.fitTitlebar() }
         tools.zoomLabel = Self.percent(webView.pageZoom)
         tools.onZoom = { [weak self] step in self?.zoom(step) }
 
@@ -251,8 +261,48 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         }
         guard message["type"] as? String == "scope" else { return }
         scope = message["name"] as? String
+        scopeKnown = true
         // The title is the short name ("SalesAutomation-Project"); the owner shows in Mission Control.
         window?.title = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Self.defaultTitle
+        icon = nil
+        WindowTabs.shared.update(tab)
+        captureIcon(message["icon"] as? [String: Any])
+    }
+
+    /// What this window's tab shows.
+    var tab: WindowTabs.Tab {
+        let name = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 }
+            ?? (scopeKnown ? "All projects" : Self.defaultTitle)
+        return WindowTabs.Tab(id: record.id, name: name, icon: icon)
+    }
+
+    /// Copies the project icon from T3's sidebar (`rect` in CSS pixels) for the tab. A
+    /// picture of the page, so it matches whatever T3 draws: an image, an SVG or initials.
+    private func captureIcon(_ rect: [String: Any]?) {
+        guard let rect, let x = rect["x"] as? Double, let y = rect["y"] as? Double,
+              let width = rect["width"] as? Double, let height = rect["height"] as? Double,
+              width > 0, height > 0 else { return }
+        let zoom = Double(webView.pageZoom)
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = CGRect(x: x * zoom, y: y * zoom, width: width * zoom, height: height * zoom)
+        let expected = scope
+        Task { [weak self] in
+            // Give an image icon a moment to load.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, self.scope == expected,
+                  let image = try? await self.webView.takeSnapshot(configuration: configuration) else { return }
+            self.icon = image
+            WindowTabs.shared.update(self.tab)
+        }
+    }
+
+    /// Sizes the title bar's two sides to the window: the tabs get the room the tools
+    /// leave, and a narrow window drops the zoom pill (zoom stays in the View menu).
+    private func fitTitlebar() {
+        guard let window else { return }
+        tools.compact = window.frame.width < 720
+        let buttons = window.standardWindowButton(.zoomButton)?.frame.maxX ?? 70
+        tabStrip.fit(room: window.frame.width - buttons - 12 - tools.view.frame.width - 12)
     }
 
     /// -1 zooms out a step, +1 in, 0 back to 100%.
@@ -265,6 +315,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         record.zoom = next == 1 ? nil : Double(next)
         persist()
     }
+
+    @objc func zoomInPage(_ sender: Any?) { zoom(1) }
+    @objc func zoomOutPage(_ sender: Any?) { zoom(-1) }
+    @objc func actualSizePage(_ sender: Any?) { zoom(0) }
 
     private static func percent(_ zoom: CGFloat) -> String { "\(Int((zoom * 100).rounded()))%" }
 
@@ -312,15 +366,19 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         }
     }
 
-    /// A PNG of what the window shows: the web page, or the waiting screen.
+    /// A PNG of the whole window: the title bar with its tabs, and the web page or the
+    /// waiting screen under it. WebKit draws the page only through its own snapshot.
     func snapshot() async -> Data? {
-        guard window != nil else { return nil }
-        if revealed, let image = try? await webView.takeSnapshot(configuration: nil) {
-            return image.pngData
+        guard let frameView = window?.contentView?.superview, let content = window?.contentView else { return nil }
+        guard let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) else { return nil }
+        frameView.cacheDisplay(in: frameView.bounds, to: rep)
+        if revealed, let page = try? await webView.takeSnapshot(configuration: nil) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            // Window coordinates: the bitmap, like the window, has its origin at the bottom left.
+            page.draw(in: content.convert(content.bounds, to: nil))
+            NSGraphicsContext.restoreGraphicsState()
         }
-        let view = waitingView
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
-        view.cacheDisplay(in: view.bounds, to: rep)
         return rep.representation(using: .png, properties: [:])
     }
 
@@ -405,7 +463,10 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     // MARK: Window lifecycle
 
     func windowDidMove(_ notification: Notification) { saveFrame() }
-    func windowDidResize(_ notification: Notification) { saveFrame() }
+    func windowDidResize(_ notification: Notification) {
+        saveFrame()
+        fitTitlebar()
+    }
 
     private func saveFrame() {
         guard let frame = window?.frame else { return }
@@ -433,13 +494,22 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     }
 }
 
-/// The title bar's right side: a zoom pill (− 100% +) and a "New window" pill,
-/// drawn as Granola draws its "New note" button: a white capsule with a hairline border.
+/// The title bar's right side: a zoom pill (− 100% +), drawn as Granola draws its
+/// "New note" button: a white capsule with a hairline border.
 @MainActor
 final class TitlebarTools: NSTitlebarAccessoryViewController {
     var onZoom: (Int) -> Void = { _ in }
     var zoomLabel = "100%" { didSet { percentButton?.title = zoomLabel } }
     private var percentButton: NSButton?
+    private var zoomPill: NSView?
+    /// Hides the zoom pill, for a narrow window.
+    var compact = false {
+        didSet {
+            guard compact != oldValue, let row = view as? NSStackView else { return }
+            zoomPill?.isHidden = compact
+            row.frame.size.width = row.fittingSize.width
+        }
+    }
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -459,13 +529,9 @@ final class TitlebarTools: NSTitlebarAccessoryViewController {
         percentButton = percent
         let zoomIn = PillButton.make(symbol: "plus", title: nil, tooltip: "Zoom In") { [weak self] in self?.onZoom(1) }
         let zoomPill = Capsule(views: [zoomOut, Divider(), percent, Divider(), zoomIn])
+        self.zoomPill = zoomPill
 
-        let newWindow = PillButton.make(symbol: "plus", title: "New window", tooltip: "New Window") {
-            (NSApp.delegate as? AppDelegate)?.newWindow(nil)
-        }
-        let newWindowPill = Capsule(views: [newWindow])
-
-        let row = NSStackView(views: [zoomPill, newWindowPill])
+        let row = NSStackView(views: [zoomPill])
         row.spacing = 8
         row.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
         row.frame.size = NSSize(width: row.fittingSize.width, height: 28)

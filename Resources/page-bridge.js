@@ -40,7 +40,10 @@
     // A collapsed sidebar removes the button; keep the last answer rather than "all projects".
     if (scope === undefined || scope === lastReported) return;
     lastReported = scope;
-    window.webkit.messageHandlers.t3pm.postMessage({ type: "scope", name: scope });
+    // Where the project's icon sits, so the app can copy it for the window's tab.
+    const rect = scope ? scopeButton()?.querySelector("img,svg,span")?.getBoundingClientRect() : null;
+    const icon = rect && { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    window.webkit.messageHandlers.t3pm.postMessage({ type: "scope", name: scope, icon });
   }
 
   let timer;
