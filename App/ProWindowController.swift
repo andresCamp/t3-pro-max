@@ -133,7 +133,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             guard let origin, !Task.isCancelled else { return }
             self.showWaiting(.loading)
             if self.record.paired {
-                self.webView.load(URLRequest(url: self.savedPage(on: origin)))
+                self.webView.load(URLRequest(url: await self.savedPage(on: origin)))
             } else {
                 self.pendingPath = self.record.url.flatMap { URL(string: $0)?.pathQueryFragment }
                 await self.pair()
@@ -154,12 +154,27 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         }
     }
 
-    /// The saved page moved onto the server's current origin, since its port can change.
-    private func savedPage(on origin: URL) -> URL {
-        guard let saved = record.url.flatMap(URL.init(string:)),
-              let rebuilt = URL(string: origin.absoluteString.trimmingSuffix("/") + saved.pathQueryFragment)
-        else { return origin }
-        return rebuilt
+    /// The saved page on the server's current port, since that can change. It keeps its
+    /// own address when the server still answers there: a window is signed in only on the
+    /// address it paired on, which is the network address `t3 pair` hands out, while the
+    /// server reports 127.0.0.1. Loading there would mean pairing again on every launch.
+    private func savedPage(on origin: URL) async -> URL {
+        guard let saved = record.url.flatMap(URL.init(string:)) else { return origin }
+        var base = origin
+        if let host = saved.host, host != origin.host,
+           var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false) {
+            parts.host = host
+            if let signedIn = parts.url, await T3Server.isReachable(signedIn) { base = signedIn }
+        }
+        return URL(string: base.absoluteString.trimmingSuffix("/") + saved.pathQueryFragment) ?? origin
+    }
+
+    /// Where this window's pages live: the address it is signed in on, once it has a page.
+    private var pageOrigin: URL? {
+        guard let url = webView.url, url.scheme?.hasPrefix("http") == true, let host = url.host else {
+            return T3Server.origin()
+        }
+        return URL(string: "\(url.scheme!)://\(host)\(url.port.map { ":\($0)" } ?? "")")
     }
 
     /// Asks the server, with this window's cookie, whether the window is signed in.
@@ -187,7 +202,8 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
                 persist()
                 // Pairing lands on the home page, so a window opened on "/" is already there.
                 if pendingPath == url.pathQueryFragment { pendingPath = nil }
-                if let path = pendingPath, let origin = T3Server.origin(),
+                // On the address the window just signed in on, not the server's reported one.
+                if let path = pendingPath, let origin = pageOrigin,
                    let target = URL(string: origin.absoluteString.trimmingSuffix("/") + path) {
                     pendingPath = nil
                     webView.load(URLRequest(url: target))
@@ -357,7 +373,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
 
     /// Shows a T3 page (path, query and fragment) in this window.
     func navigate(path: String) {
-        guard let origin = T3Server.origin(),
+        guard let origin = pageOrigin,
               let url = URL(string: origin.absoluteString.trimmingSuffix("/") + path) else { return }
         if record.paired {
             webView.load(URLRequest(url: url))
