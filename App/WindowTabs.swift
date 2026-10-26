@@ -67,8 +67,8 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 28))
-        // Centred where the tabs are, a little above the bar's middle, like the window buttons.
-        name.font = .titleBarFont(ofSize: 0)
+        // Regular weight, not the bold title font. Centred where the tabs are, a little above the bar's middle, like the window buttons.
+        name.font = .systemFont(ofSize: 13)
         name.textColor = .labelColor
         name.sizeToFit()
         name.frame.origin = NSPoint(x: 4, y: (15.5 - name.frame.height / 2).rounded())
