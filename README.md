@@ -13,7 +13,7 @@ It is a small native Mac app (Swift and WebKit) that runs next to the T3 Code de
 ## What it does
 
 - **Many windows.** Click **+** after the tabs in the title bar. Each window pairs with T3 Code by itself. You never see a pairing link or a QR code.
-- **Tabs in the title bar.** Every window shows one tab per open window, named by its project with the project's icon, and its own tab raised. Click a tab to bring that window forward, on any display or Space, or its × (on hover) to close it. When the tabs don't fit, they scroll sideways and the window's own tab stays in view.
+- **Tabs in the title bar.** Every window shows one tab per open window, named by its project with the project's icon, and its own tab raised. Click a tab to bring that window forward, on any display or Space, or its × (on hover) to close it. When the tabs don't fit, they scroll sideways and the window's own tab stays in view. The first tab, **T3 Code**, always takes you to the T3 Code app.
 - **New windows open ready.** The app keeps the next window paired and loaded out of sight, so **+** shows T3 Code at once. A window that has to load shows a quiet loading screen until the page is drawn, never a half-loaded page.
 - **Each window keeps its own state.** Its project filter, sidebar, panels and drafts are separate from every other window's. Change the filter in one window and the others stay as they are.
 - **Windows come back.** Quit and reopen, and every window returns on the same display, at the same size, on the same thread, with the same filter and zoom.

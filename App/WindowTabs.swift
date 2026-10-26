@@ -48,7 +48,9 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
     private let plus = NSHostingView(rootView: NewWindowButton())
     private static let plusWidth: CGFloat = 30
     private let name = NSTextField(labelWithString: ProWindowController.defaultTitle)
-    /// Where the scrolling tabs start: after the name.
+    /// The fixed first tab, to the T3 Code app; nil when that app isn't installed.
+    private let home: NSHostingView<HomeTab>? = HomeTab.appURL.map { NSHostingView(rootView: HomeTab(app: $0)) }
+    /// Where the scrolling tabs start: after the name and the home tab.
     private var tabsStart: CGFloat = 0
     private let fade = CAGradientLayer()
     private var subscription: AnyCancellable?
@@ -72,7 +74,14 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
         name.sizeToFit()
         name.frame.origin = NSPoint(x: 4, y: (15.5 - name.frame.height / 2).rounded())
         container.addSubview(name)
-        tabsStart = name.frame.maxX + 12
+        tabsStart = name.frame.maxX + 10
+        if let home {
+            home.sceneBridgingOptions = []
+            home.frame = NSRect(x: tabsStart, y: 0, width: home.fittingSize.width, height: 28)
+            home.sizingOptions = []
+            container.addSubview(home)
+            tabsStart = home.frame.maxX + 2
+        }
         row.sceneBridgingOptions = []
         row.sizingOptions = []
         scroll.frame = container.bounds
@@ -274,6 +283,42 @@ private struct NewWindowButton: View {
         .onHover { hovering = $0 }
         .help("New Window")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, 3)
+    }
+}
+
+/// The fixed first tab: brings the T3 Code app forward, opening it if needed. The ↗
+/// says it leaves this app; it is never the current tab and has no ×.
+private struct HomeTab: View {
+    static let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: T3Server.desktopBundleID)
+    let app: URL
+    @State private var hovering = false
+
+    var body: some View {
+        Button { _ = T3Server.openDesktopApp() } label: {
+            HStack(spacing: 6) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: app.path))
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 16, height: 16)
+                Text("T3 Code")
+                    .font(.system(size: 12))
+                    .foregroundStyle(hovering ? .primary : .secondary)
+                    .fixedSize()
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.primary.opacity(hovering ? 0.06 : 0)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Open T3 Code")
+        .frame(maxHeight: .infinity)
         .padding(.bottom, 3)
     }
 }
