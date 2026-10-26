@@ -33,7 +33,8 @@ final class WindowTabs: ObservableObject {
     }
 }
 
-/// Holds the strip on the title bar's leading side, after the window buttons. Its width
+/// Holds the strip on the title bar's leading side, after the window buttons and the
+/// product name, which stays put while the tabs scroll. Its width
 /// is the tabs' own width, capped by the room left (see `fit`), so the empty part of the
 /// title bar still drags the window. When the tabs need more, they scroll sideways; a
 /// fade marks each edge with tabs past it, and a › the trailing one. The + stays outside
@@ -46,6 +47,10 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
     private let more = NSImageView()
     private let plus = NSHostingView(rootView: NewWindowButton())
     private static let plusWidth: CGFloat = 30
+    private let name = NSTextField(labelWithString: ProWindowController.defaultTitle)
+    private let rule = NSBox()
+    /// Where the scrolling tabs start: after the name and the hairline.
+    private var tabsStart: CGFloat = 0
     private let fade = CAGradientLayer()
     private var subscription: AnyCancellable?
     /// Called when the tabs' width changes, so the window can fit the strip again.
@@ -62,6 +67,16 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
 
     override func loadView() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 28))
+        // Centred where the tabs are, a little above the bar's middle, like the window buttons.
+        name.font = .titleBarFont(ofSize: 0)
+        name.textColor = .labelColor
+        name.sizeToFit()
+        name.frame.origin = NSPoint(x: 4, y: (15.5 - name.frame.height / 2).rounded())
+        container.addSubview(name)
+        rule.boxType = .separator
+        rule.frame = NSRect(x: name.frame.maxX + 10, y: 7.5, width: 1, height: 16)
+        container.addSubview(rule)
+        tabsStart = rule.frame.maxX + 8
         row.sceneBridgingOptions = []
         row.sizingOptions = []
         scroll.frame = container.bounds
@@ -107,13 +122,14 @@ final class TitlebarTabs: NSTitlebarAccessoryViewController {
     func fit(room: CGFloat) {
         let full = width(of: WindowTabs.shared.tabs)
         row.frame = NSRect(x: 0, y: 0, width: full, height: 28)
-        let width = max(0, min(full, room - Self.plusWidth)).rounded(.down)
-        if abs(view.frame.width - width - Self.plusWidth) > 0.5 {
-            view.frame.size = NSSize(width: width + Self.plusWidth, height: 28)
+        let width = max(0, min(full, room - tabsStart - Self.plusWidth)).rounded(.down)
+        let total = tabsStart + width + Self.plusWidth
+        if abs(view.frame.width - total) > 0.5 {
+            view.frame.size = NSSize(width: total, height: 28)
         }
-        scroll.frame = NSRect(x: 0, y: 0, width: width, height: 28)
-        more.frame.origin.x = width - more.frame.width
-        plus.frame.origin.x = width
+        scroll.frame = NSRect(x: tabsStart, y: 0, width: width, height: 28)
+        more.frame.origin.x = scroll.frame.maxX - more.frame.width
+        plus.frame.origin.x = scroll.frame.maxX
         showCurrent()
         markEdges()
     }
