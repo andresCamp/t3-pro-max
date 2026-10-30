@@ -34,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         WindowTabs.shared.onNew = { [unowned self] in openWindow() }
         WindowTabs.shared.onMove = { [unowned self] id, index in move(id, to: index) }
+        WindowTabs.shared.onRename = { [unowned self] id, name in
+            controllers.first { $0.record.id == id }?.rename(name)
+        }
         let saved = WindowStore.shared.records
         if saved.isEmpty {
             openWindow()

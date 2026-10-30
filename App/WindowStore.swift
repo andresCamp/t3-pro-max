@@ -1,6 +1,6 @@
 // Remembers the open windows across launches: where each one sat, which T3 page it
-// showed, and whether it has paired. Each window's filters, panels and drafts are not
-// kept here; they live in that window's own WebKit storage (see ProWindowController).
+// showed, and whether it has paired. UI state is also mirrored here so a server
+// port change does not lose the window's project selection.
 
 import Foundation
 
@@ -15,6 +15,10 @@ struct WindowRecord: Codable, Equatable {
     var paired: Bool = false
     /// Page zoom set from the title bar control; nil is 100%.
     var zoom: Double?
+    /// A user-chosen tab label; nil follows the folder name.
+    var customName: String?
+    /// Origin-independent backup of T3's UI state, including the project filter.
+    var uiState: String?
 }
 
 @MainActor

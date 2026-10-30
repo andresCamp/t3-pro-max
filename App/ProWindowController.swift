@@ -62,15 +62,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         configuration.preferences.isElementFullscreenEnabled = true
         let bridge = MessageProxy()
         configuration.userContentController.add(bridge, name: "t3pm")
-        if let script = Bundle.main.url(forResource: "page-bridge", withExtension: "js")
-            .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }) {
-            configuration.userContentController.addUserScript(
-                WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        }
-        if let settings = Notifier.settingsScript() {
-            configuration.userContentController.addUserScript(
-                WKUserScript(source: settings, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        }
+        Self.installScripts(on: configuration.userContentController, uiState: record.uiState)
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
@@ -80,7 +72,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = Self.defaultTitle
+        window.title = record.customName ?? Self.defaultTitle
         // The tab strip names the window instead; the title still shows in the Window menu.
         window.titleVisibility = .hidden
         window.minSize = NSSize(width: 480, height: 360)
@@ -121,6 +113,27 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         observations.append(webView.observe(\.url, options: [.new]) { [weak self] web, _ in
             MainActor.assumeIsolated { self?.urlChanged(web.url) }
         })
+    }
+
+    private static func installScripts(on controller: WKUserContentController, uiState: String?) {
+        controller.removeAllUserScripts()
+        if let source = Bundle.main.url(forResource: "state-bridge", withExtension: "js")
+            .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }),
+           let data = try? JSONEncoder().encode(uiState),
+           let literal = String(data: data, encoding: .utf8) {
+            controller.addUserScript(WKUserScript(
+                source: "(function(saved) {\n" + source + "\n})(" + literal + ");",
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+        if let script = Bundle.main.url(forResource: "page-bridge", withExtension: "js")
+            .flatMap({ try? String(contentsOf: $0, encoding: .utf8) }) {
+            controller.addUserScript(
+                WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
+        if let settings = Notifier.settingsScript() {
+            controller.addUserScript(
+                WKUserScript(source: settings, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -284,6 +297,14 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     /// Messages from page-bridge.js.
     private func pageMessage(_ body: Any) {
         guard let message = body as? [String: Any] else { return }
+        if message["type"] as? String == "ui-state" {
+            let state = message["value"] as? String ?? "null"
+            guard state != record.uiState else { return }
+            record.uiState = state
+            persist()
+            Self.installScripts(on: webView.configuration.userContentController, uiState: state)
+            return
+        }
         if message["type"] as? String == "ready" {
             pageReady = true
             if finalPage { reveal() }
@@ -303,7 +324,7 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         scope = message["name"] as? String
         scopeKnown = true
         // The title is the short name ("SalesAutomation-Project"); the owner shows in Mission Control.
-        window?.title = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Self.defaultTitle
+        window?.title = record.customName ?? scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Self.defaultTitle
         icon = nil
         WindowTabs.shared.update(tab)
         captureIcon(message["icon"] as? [String: Any])
@@ -313,7 +334,16 @@ final class ProWindowController: NSWindowController, NSWindowDelegate, WKNavigat
     var tab: WindowTabs.Tab {
         let name = scope.map { $0.split(separator: "/").last.map(String.init) ?? $0 }
             ?? (scopeKnown ? "All projects" : Self.defaultTitle)
-        return WindowTabs.Tab(id: record.id, name: name, icon: icon)
+        return WindowTabs.Tab(id: record.id, name: record.customName ?? name, icon: icon,
+                              folderName: scope ?? name)
+    }
+
+    func rename(_ name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        record.customName = name.isEmpty ? nil : name
+        window?.title = tab.name
+        WindowTabs.shared.update(tab)
+        persist()
     }
 
     /// Copies the project icon from T3's sidebar (`rect` in CSS pixels) for the tab. A

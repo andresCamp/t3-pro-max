@@ -19,6 +19,7 @@ final class WindowTabs: ObservableObject {
         let id: UUID
         var name: String
         var icon: NSImage?
+        var folderName: String = ""
     }
 
     /// In the order the windows were opened, or as dragged since.
@@ -28,6 +29,7 @@ final class WindowTabs: ObservableObject {
     var onMove: (UUID, Int) -> Void = { _, _ in }
     var onClose: (UUID) -> Void = { _ in }
     var onNew: () -> Void = {}
+    var onRename: (UUID, String) -> Void = { _, _ in }
 
     /// Replaces a window's tab when its project or icon changes. A spare is not listed, so it is ignored.
     func update(_ tab: Tab) {
@@ -184,7 +186,7 @@ private struct LiveTabRow: View {
 
     var body: some View {
         TabRow(tabs: model.tabs, current: current, onSelect: model.onSelect, onClose: model.onClose,
-               onMove: model.onMove, scroller: scroller)
+               onRename: model.onRename, onMove: model.onMove, scroller: scroller)
             .frame(maxHeight: .infinity)
             // In line with the window buttons, which sit a little above the bar's middle.
             .padding(.bottom, 3)
@@ -240,6 +242,7 @@ struct TabRow: View {
     let current: UUID
     var onSelect: (UUID) -> Void = { _ in }
     var onClose: (UUID) -> Void = { _ in }
+    var onRename: (UUID, String) -> Void = { _, _ in }
     var onMove: ((UUID, Int) -> Void)? = nil
     var scroller: DragScroller? = nil
 
@@ -252,13 +255,15 @@ struct TabRow: View {
     @State private var gap = 0
     /// True from a drag's release until the order changes, so the release is not also a click.
     @State private var settling = false
+    @State private var editingTab: UUID?
 
     var body: some View {
         HStack(spacing: Self.spacing) {
             ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                 TabButton(tab: tab, isCurrent: tab.id == current, isLifted: dragged == tab.id,
                           select: { if dragged == nil, !settling { onSelect(tab.id) } },
-                          close: { onClose(tab.id) })
+                          close: { onClose(tab.id) }, rename: { onRename(tab.id, $0) },
+                          onEditing: { editingTab = $0 ? tab.id : nil })
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { widths[tab.id] = $0 }
                     .offset(x: shift(of: index, tab.id))
                     .zIndex(dragged == tab.id ? 1 : 0)
@@ -289,6 +294,7 @@ struct TabRow: View {
         // A press that doesn't move is a click on the tab.
         DragGesture(minimumDistance: 4)
             .onChanged { value in
+                guard editingTab == nil else { return }
                 if dragged == nil {
                     scroller?.begin()
                     dragged = id
@@ -331,26 +337,67 @@ private struct TabButton: View {
     var isLifted = false
     let select: () -> Void
     let close: () -> Void
+    let rename: (String) -> Void
+    let onEditing: (Bool) -> Void
     @State private var hovering = false
     @State private var hoveringClose = false
+    @State private var renaming = false
 
     var body: some View {
         HStack(spacing: 0) {
-            Button(action: select) {
-                HStack(spacing: 6) {
-                    icon
-                    Text(tab.name)
-                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
-                        .foregroundStyle(isCurrent ? .primary : .secondary)
-                        .fixedSize()
+            Group {
+                if renaming {
+                    HStack(spacing: 6) {
+                        icon
+                        Text(tab.name)
+                            .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                            .fixedSize()
+                            .hidden()
+                            .overlay {
+                                InlineTabName(name: tab.name, isCurrent: isCurrent) { name in
+                                    renaming = false
+                                    if let name { rename(name) }
+                                }
+                                .background {
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(Color(nsColor: .textBackgroundColor))
+                                        .overlay {
+                                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                                .strokeBorder(Color.accentColor, lineWidth: 1)
+                                        }
+                                        // Decoration uses the label's existing spacing;
+                                        // the hidden label still determines layout.
+                                        .padding(.horizontal, -3)
+                                        .padding(.vertical, -3)
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                    }
+                    .padding(.leading, 10)
+                    .padding(.trailing, 4)
+                } else {
+                    HStack(spacing: 6) {
+                        icon
+                        Text(tab.name)
+                            .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                            .foregroundStyle(isCurrent ? .primary : .secondary)
+                            .fixedSize()
+                    }
+                    .padding(.leading, 10)
+                    .padding(.trailing, 4)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(tab.name)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { select() }
+                    .accessibilityAction(named: "Rename") { renaming = true }
+                    .overlay {
+                        TabMouseInput(select: select, rename: { renaming = true })
+                    }
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 4)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help(isCurrent ? tab.name : "Show the \(tab.name) window")
+            .help(tab.folderName)
 
             // Its room is kept while hidden, so the tab never changes width on hover.
             Button(action: close) {
@@ -385,6 +432,7 @@ private struct TabButton: View {
                         radius: isLifted ? 6 : 1, y: isLifted ? 3 : 1)
         }
         .onHover { hovering = $0 }
+        .onChange(of: renaming) { _, value in onEditing(value) }
     }
 
     @ViewBuilder private var icon: some View {
@@ -393,6 +441,150 @@ private struct TabButton: View {
             .interpolation(.high)
             .frame(width: 15, height: 15)
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+}
+
+/// AppKit resolves single versus double clicks before invoking either action.
+private struct TabMouseInput: NSViewRepresentable {
+    let select: () -> Void
+    let rename: () -> Void
+
+    func makeNSView(context: Context) -> ClickView { ClickView() }
+
+    func updateNSView(_ view: ClickView, context: Context) {
+        view.select = select
+        view.rename = rename
+    }
+
+    final class ClickView: NSView, NSGestureRecognizerDelegate {
+        var select: () -> Void = {}
+        var rename: () -> Void = {}
+        private lazy var singleClick = NSClickGestureRecognizer(target: self, action: #selector(selectTab))
+        private lazy var doubleClick: NSClickGestureRecognizer = {
+            let click = NSClickGestureRecognizer(target: self, action: #selector(renameTab))
+            click.numberOfClicksRequired = 2
+            return click
+        }()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            singleClick.delegate = self
+            doubleClick.delegate = self
+            addGestureRecognizer(singleClick)
+            addGestureRecognizer(doubleClick)
+        }
+
+        required init?(coder: NSCoder) { fatalError("not used") }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        @objc private func selectTab() { select() }
+        @objc private func renameTab() { rename() }
+
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                               shouldRequireFailureOf otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+            gestureRecognizer === singleClick && otherGestureRecognizer === doubleClick
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+            // Keep the enclosing row's drag gesture available for reordering.
+            otherGestureRecognizer !== singleClick && otherGestureRecognizer !== doubleClick
+        }
+    }
+}
+
+/// A native field editor keeps selection and keyboard behavior inside the tab.
+private struct InlineTabName: NSViewRepresentable {
+    let name: String
+    let isCurrent: Bool
+    let finish: (String?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(finish: finish) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: name)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.font = .systemFont(ofSize: 12, weight: isCurrent ? .semibold : .regular)
+        field.focusRingType = .none
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("Tab name")
+        context.coordinator.field = field
+        DispatchQueue.main.async { [weak field] in
+            guard let field, let window = field.window else { return }
+            window.makeFirstResponder(field)
+            // selectText ends the current edit before selecting, which calls our
+            // commit delegate and removes this view during its own setup.
+            field.currentEditor()?.selectedRange = NSRange(location: 0, length: (field.stringValue as NSString).length)
+            context.coordinator.start()
+        }
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {}
+
+    static func dismantleNSView(_ field: NSTextField, coordinator: Coordinator) {
+        coordinator.stop()
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        weak var field: NSTextField?
+        private let finish: (String?) -> Void
+        private var monitor: Any?
+        private var observer: NSObjectProtocol?
+        private var finished = false
+
+        init(finish: @escaping (String?) -> Void) { self.finish = finish }
+
+        func start() {
+            guard !finished, let field else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                guard let self, let field = self.field else { return event }
+                if event.window !== field.window || !field.bounds.contains(field.convert(event.locationInWindow, from: nil)) {
+                    self.complete(field.stringValue)
+                }
+                return event
+            }
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification, object: field.window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.complete(self.field?.stringValue)
+                }
+            }
+        }
+
+        func stop() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            monitor = nil
+            observer = nil
+        }
+
+        private func complete(_ name: String?) {
+            guard !finished else { return }
+            finished = true
+            stop()
+            finish(name)
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            complete(field?.stringValue)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+            if command == #selector(NSResponder.cancelOperation(_:)) {
+                complete(nil)
+                return true
+            }
+            if command == #selector(NSResponder.insertNewline(_:)) {
+                complete(field?.stringValue)
+                return true
+            }
+            return false
+        }
     }
 }
 
